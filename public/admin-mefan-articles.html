@@ -34,8 +34,11 @@
   </style>
 </head>
 <body>
-<h1>📃 文章后台管理</h1>
+
+<h1>📰 文章后台管理</h1>
+
 <div id="authArea"><button id="loginBtn" class="btn">使用 GitHub 登录</button></div>
+
 <div id="adminArea" class="hidden">
   <div class="admin-bar">
     <input type="text" id="searchInput" placeholder="搜索标题关键词…" />
@@ -44,6 +47,7 @@
       <button id="logoutBtn" class="btn">退出登录</button>
     </div>
   </div>
+
   <h2>🆕 新增/编辑文章</h2>
   <input type="text" id="newTitle" placeholder="标题" />
   <textarea id="newContent" placeholder="支持 Markdown 格式的内容"></textarea>
@@ -52,14 +56,18 @@
     <button id="submitBtn" class="btn">提交</button>
     <button id="cancelEditBtn" class="btn hidden">取消编辑</button>
   </div>
+
   <div style="overflow-x: auto; width: 100%;">
     <table id="articlesTable">
       <thead>
-        <tr><th>标题</th><th>作者</th><th>内容</th><th>创建时间</th><th>更新时间</th><th>星期</th><th>封面</th><th>操作</th></tr>
+        <tr>
+          <th>标题</th><th>作者</th><th>内容</th><th>创建时间</th><th>更新时间</th><th>星期</th><th>封面</th><th>操作</th>
+        </tr>
       </thead>
       <tbody></tbody>
     </table>
   </div>
+
   <div id="previewModal" class="hidden">
     <h3 id="previewTitle"></h3>
     <img id="previewCover" />
@@ -67,15 +75,195 @@
     <button class="btn" onclick="closePreview()">关闭</button>
   </div>
 </div>
+
 <script src="https://cdn.jsdelivr.net/npm/marked/marked.min.js"></script>
 <script>
-const API_BASE = 'https://api.oliverfr.com/api';
-const ADMIN_EMAIL = 'oliveroogle@gmail.com';
-if (location.hash.includes('access_token')) {
-  history.replaceState(null, '', '/admin-mefan-articles.html');
-  location.reload();
-}
+  const API_BASE    = 'https://api.oliverfr.com/api';
+  const ADMIN_EMAIL = 'oliveroogle@gmail.com';
+
+  function formatBeijingTime(d) {
+    return new Date(d).toLocaleString('zh-CN',{ timeZone:'Asia/Shanghai', hour12:false });
+  }
+  function getWeekday(d) {
+    return ['星期日','星期一','星期二','星期三','星期四','星期五','星期六'][new Date(d).getDay()];
+  }
+
+  async function getCurrentUser() {
+    try {
+      const res  = await fetch(`${API_BASE}/auth-github/session`, { credentials: 'include' });
+      if (!res.ok) return null;
+      const json = await res.json();
+      return json.user || json.data?.user || null;
+    } catch (e) {
+      console.error('getCurrentUser error', e);
+      return null;
+    }
+  }
+
+  document.addEventListener('DOMContentLoaded', async () => {
+    const authArea = document.getElementById('authArea');
+    const adminArea = document.getElementById('adminArea');
+    const loginBtn = document.getElementById('loginBtn');
+    const logoutBtn = document.getElementById('logoutBtn');
+    const submitBtn = document.getElementById('submitBtn');
+    const cancelBtn = document.getElementById('cancelEditBtn');
+    const searchBtn = document.getElementById('searchBtn');
+    const searchInput = document.getElementById('searchInput');
+    const articlesTable = document.querySelector('#articlesTable tbody');
+
+    let currentEditId = null, currentPage = 1, limit = 5, loading = false;
+
+    // 清除 URL 上的 token
+    if (location.hash.includes('access_token=')) {
+      history.replaceState(null, '', location.pathname);
+    }
+
+    const user = await getCurrentUser();
+    if (user?.email === ADMIN_EMAIL) {
+      authArea.classList.add('hidden');
+      adminArea.classList.remove('hidden');
+      loadArticles();
+    }
+
+    loginBtn.onclick = () => {
+      const callback = encodeURIComponent(`${location.origin}/admin-mefan-articles.html`);
+      window.location.href = `${API_BASE}/auth-github?redirect=${callback}`;
+    };
+
+    logoutBtn.onclick = async () => {
+      await fetch(`${API_BASE}/auth-github/logout`, {
+        method: 'POST',
+        credentials: 'include'
+      });
+      location.reload();
+    };
+
+    submitBtn.onclick = async () => {
+      const title = document.getElementById('newTitle').value.trim();
+      const content = document.getElementById('newContent').value.trim();
+      if (!title || !content) return alert('标题或内容不能为空');
+      const me = await getCurrentUser();
+      if (!me) return alert('请先登录');
+
+      let coverUrl = '';
+      const file = document.getElementById('coverInput').files[0];
+      if (file) {
+        const fd = new FormData();
+        fd.append('file', file);
+        const upRes = await fetch(`${API_BASE}/upload-cover`, {
+          method: 'POST',
+          credentials: 'include',
+          body: fd
+        });
+        const upJson = await upRes.json();
+        if (upJson.error) return alert('封面上传失败：' + upJson.error);
+        coverUrl = upJson.publicUrl;
+      }
+
+      const payload = {
+        title,
+        content,
+        author_email: me.email,
+        updated_at: new Date().toISOString(),
+        cover_url: coverUrl || undefined,
+        id: currentEditId
+      };
+
+      const res = await fetch(`${API_BASE}/articles`, {
+        method: currentEditId ? 'PATCH' : 'POST',
+        credentials: 'include',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(payload)
+      });
+      const json = await res.json();
+      if (!json.success) return alert('提交失败：' + json.error);
+      cancelBtn.click();
+      loadArticles(true);
+    };
+
+    cancelBtn.onclick = () => {
+      document.getElementById('newTitle').value = '';
+      document.getElementById('newContent').value = '';
+      document.getElementById('coverInput').value = '';
+      currentEditId = null;
+      cancelBtn.classList.add('hidden');
+    };
+
+    window.deleteArticle = async id => {
+      if (!confirm('确定删除？')) return;
+      const res = await fetch(`${API_BASE}/articles?id=${id}`, {
+        method: 'DELETE',
+        credentials: 'include'
+      });
+      const json = await res.json();
+      if (!json.success) return alert('删除失败：' + json.error);
+      loadArticles(true);
+    };
+
+    window.editArticle = row => {
+      document.getElementById('newTitle').value = row.title;
+      document.getElementById('newContent').value = row.content;
+      currentEditId = row.id;
+      cancelBtn.classList.remove('hidden');
+      window.scrollTo(0, 0);
+    };
+
+    window.previewArticle = row => {
+      document.getElementById('previewTitle').textContent = row.title;
+      document.getElementById('previewCover').src = row.cover_url || '';
+      document.getElementById('markdownContent').innerHTML = marked.parse(row.content || '');
+      document.getElementById('previewModal').classList.remove('hidden');
+    };
+
+    window.closePreview = () => {
+      document.getElementById('previewModal').classList.add('hidden');
+    };
+
+    searchBtn.onclick = () => loadArticles(true, searchInput.value.trim());
+
+    window.addEventListener('scroll', () => {
+      if (window.innerHeight + window.scrollY >= document.body.offsetHeight - 10) {
+        loadArticles();
+      }
+    });
+
+    async function loadArticles(reset = false, keyword = '') {
+      if (loading) return;
+      loading = true;
+      if (reset) {
+        articlesTable.innerHTML = '';
+        currentPage = 1;
+      }
+      const url = new URL(`${API_BASE}/articles`);
+      url.searchParams.set('page', currentPage);
+      url.searchParams.set('limit', limit);
+      if (keyword) url.searchParams.set('q', keyword);
+
+      const res = await fetch(url, { credentials: 'include' });
+      const { articles, totalPages } = await res.json();
+
+      articles.forEach(row => {
+        const tr = document.createElement('tr');
+        tr.innerHTML = `
+          <td data-label="标题">${row.title}</td>
+          <td data-label="作者">${row.author_email}</td>
+          <td data-label="内容">${row.content?.slice(0,60)}...</td>
+          <td data-label="创建时间">${formatBeijingTime(row.created_at)}</td>
+          <td data-label="更新时间">${formatBeijingTime(row.updated_at)}</td>
+          <td data-label="星期">${getWeekday(row.created_at)}</td>
+          <td data-label="封面">${row.cover_url ? `<img src="${row.cover_url}" style="height:40px;">` : ''}</td>
+          <td data-label="操作">
+            <button class="btn" onclick='previewArticle(${JSON.stringify(row)})'>预览</button>
+            <button class="btn" onclick='editArticle(${JSON.stringify(row)})'>编辑</button>
+            <button class="btn" onclick='deleteArticle("${row.id}")'>删除</button>
+          </td>`;
+        articlesTable.appendChild(tr);
+      });
+
+      loading = false;
+      if (currentPage < totalPages) currentPage++;
+    }
+  });
 </script>
-<script src="/public/admin-mefan-articles.js"></script>
 </body>
 </html>
