@@ -128,9 +128,9 @@
 
     // —— 登录 —— 
     loginBtn.onclick = () => {
-      window.location.href =
-        `${API_BASE}/auth-github?redirect=${encodeURIComponent(location.href)}`;
-    };
+  window.location.href = `${API_BASE}/auth-github`;
+};
+
 
     // —— 登出 —— 
     logoutBtn.onclick = async () => {
