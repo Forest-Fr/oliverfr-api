@@ -1,0 +1,276 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8" />
+  <title>文章后台管理</title>
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <style>
+    /* —— 保留你原来的所有样式 —— */
+    body { font-family: Arial, sans-serif; background: #f8f8f8; margin: 0; padding: 20px; display: flex; flex-direction: column; align-items: center; }
+    h1 { font-size: 24px; display: flex; align-items: center; gap: 10px; }
+    .btn { padding: 8px 16px; background: #333; color: #fff; border: none; cursor: pointer; margin-right: 5px; }
+    .btn:hover { background: #555; }
+    .hidden { display: none; }
+    textarea, input[type="text"], input[type="file"] { width: 100%; margin: 5px 0; }
+    table { width: 100%; max-width: 960px; border-collapse: collapse; margin-top: 20px; background: #fff; }
+    th, td { padding: 10px; border: 1px solid #ddd; text-align: left; }
+    th { background: #f0f0f0; }
+    .admin-bar { display: flex; justify-content: space-between; align-items: center; max-width: 960px; width: 100%; margin-bottom: 20px; flex-wrap: wrap; }
+    .admin-bar > input { flex: 1; min-width: 200px; margin: 5px; }
+    .admin-bar > div { display: flex; gap: 8px; flex-wrap: wrap; justify-content: flex-end; min-width: 200px; margin: 5px; }
+    #previewModal { position: fixed; top: 10%; left: 50%; transform: translateX(-50%); background: white; padding: 20px; border: 1px solid #ccc; max-width: 700px; width: 90%; z-index: 999; overflow-y: auto; max-height: 80vh; }
+    #previewModal h3 { margin-top: 0; }
+    #previewModal img { max-width: 100%; }
+    #markdownContent { white-space: pre-wrap; }
+    @media (max-width: 768px) {
+      .admin-bar { flex-direction: column; align-items: stretch; }
+      .btn, textarea { width: 100%; margin: 5px 0; }
+      table, thead, tbody, th, td, tr { display: block; }
+      thead { display: none; }
+      tbody tr { border: 1px solid #ddd; margin-bottom: 15px; background: #fff; padding: 10px; }
+      tbody td { display: flex; justify-content: space-between; padding: 8px 5px; border: none; border-bottom: 1px solid #eee; }
+      tbody td::before { content: attr(data-label); font-weight: bold; color: #555; flex: 1; margin-right: 10px; }
+      #submitBtn, #cancelEditBtn { width: 100%; }
+    }
+  </style>
+</head>
+<body>
+
+<h1>📰 文章后台管理</h1>
+
+<div id="authArea"><button id="loginBtn" class="btn">使用 GitHub 登录</button></div>
+
+<div id="adminArea" class="hidden">
+  <div class="admin-bar">
+    <input type="text" id="searchInput" placeholder="搜索标题关键词…" />
+    <div>
+      <button id="searchBtn" class="btn">🔍 搜索</button>
+      <button id="logoutBtn" class="btn">退出登录</button>
+    </div>
+  </div>
+
+  <h2>🆕 新增/编辑文章</h2>
+  <input type="text" id="newTitle" placeholder="标题" />
+  <textarea id="newContent" placeholder="支持 Markdown 格式的内容"></textarea>
+  <input type="file" id="coverInput" accept="image/*" />
+  <div style="display: flex; gap: 10px; margin-bottom: 10px; flex-wrap: wrap;">
+    <button id="submitBtn" class="btn">提交</button>
+    <button id="cancelEditBtn" class="btn hidden">取消编辑</button>
+  </div>
+
+  <div style="overflow-x: auto; width: 100%;">
+    <table id="articlesTable">
+      <thead>
+        <tr>
+          <th>标题</th><th>作者</th><th>内容</th><th>创建时间</th><th>更新时间</th><th>星期</th><th>封面</th><th>操作</th>
+        </tr>
+      </thead>
+      <tbody></tbody>
+    </table>
+  </div>
+
+  <div id="previewModal" class="hidden">
+    <h3 id="previewTitle"></h3>
+    <img id="previewCover" />
+    <div id="markdownContent"></div>
+    <button class="btn" onclick="closePreview()">关闭</button>
+  </div>
+</div>
+
+<script src="https://cdn.jsdelivr.net/npm/marked/marked.min.js"></script>
+<script>
+  // —— 只改这几行 —— 
+  const API_BASE    = 'https://api.oliverfr.com/api';
+  const ADMIN_EMAIL = 'oliveroogle@gmail.com';
+
+  // 时间格式化（保持不变）
+  function formatBeijingTime(d) {
+    return new Date(d).toLocaleString('zh-CN',{ timeZone:'Asia/Shanghai', hour12:false });
+  }
+  function getWeekday(d) {
+    return ['星期日','星期一','星期二','星期三','星期四','星期五','星期六'][new Date(d).getDay()];
+  }
+
+  // —— 安全地获取当前用户 —— 
+  async function getCurrentUser() {
+    try {
+      const res  = await fetch(`${API_BASE}/auth-github/session`, { credentials: 'include' });
+      if (!res.ok) return null;
+      const json = await res.json();
+      // 根据你的 API 返回结构调整这一行
+      return json.user || json.data?.user || null;
+    } catch (e) {
+      console.error('getCurrentUser error', e);
+      return null;
+    }
+  }
+
+  document.addEventListener('DOMContentLoaded', async () => {
+    const authArea      = document.getElementById('authArea');
+    const adminArea     = document.getElementById('adminArea');
+    const loginBtn      = document.getElementById('loginBtn');
+    const logoutBtn     = document.getElementById('logoutBtn');
+    const submitBtn     = document.getElementById('submitBtn');
+    const cancelBtn     = document.getElementById('cancelEditBtn');
+    const searchBtn     = document.getElementById('searchBtn');
+    const searchInput   = document.getElementById('searchInput');
+    const articlesTable = document.querySelector('#articlesTable tbody');
+
+    let currentEditId = null, currentPage = 1, limit = 5, loading = false;
+
+    // —— 会话检查 —— 
+    const user = await getCurrentUser();
+    if (user?.email === ADMIN_EMAIL) {
+      authArea.classList.add('hidden');
+      adminArea.classList.remove('hidden');
+      loadArticles();
+    }
+
+    // —— 登录 —— 
+    loginBtn.onclick = () => {
+      window.location.href =
+        `${API_BASE}/auth-github?redirect=${encodeURIComponent(location.href)}`;
+    };
+
+    // —— 登出 —— 
+    logoutBtn.onclick = async () => {
+      // 如果你的 API 是 GET，请改为 GET
+      await fetch(`${API_BASE}/auth-github/logout`, {
+        method: 'POST',
+        credentials: 'include'
+      });
+      location.reload();
+    };
+
+    // —— 提交文章（新增/编辑） —— 
+    submitBtn.onclick = async () => {
+      const title   = document.getElementById('newTitle').value.trim();
+      const content = document.getElementById('newContent').value.trim();
+      if (!title || !content) return alert('标题或内容不能为空');
+
+      const me = await getCurrentUser();
+      if (!me) return alert('请先登录');
+
+      // 上传封面
+      let coverUrl = '';
+      const file = document.getElementById('coverInput').files[0];
+      if (file) {
+        const fd = new FormData();
+        fd.append('file', file);
+        const upRes = await fetch(`${API_BASE}/upload-cover`, {
+          method: 'POST',
+          credentials: 'include',
+          body: fd
+        });
+        const upJson = await upRes.json();
+        if (upJson.error) return alert('封面上传失败：' + upJson.error);
+        coverUrl = upJson.publicUrl;
+      }
+
+      // 新增或编辑
+      const payload = {
+        title,
+        content,
+        author_email: me.email,
+        updated_at:   new Date().toISOString(),
+        cover_url:    coverUrl || undefined,
+        id:           currentEditId
+      };
+      const res = await fetch(`${API_BASE}/articles`, {
+        method: currentEditId ? 'PATCH' : 'POST',
+        credentials: 'include',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(payload)
+      });
+      const json = await res.json();
+      if (!json.success) return alert('提交失败：' + json.error);
+
+      // 重置 & 刷新
+      cancelBtn.click();
+      loadArticles(true);
+    };
+
+    // —— 取消编辑 —— 
+    cancelBtn.onclick = () => {
+      document.getElementById('newTitle').value   = '';
+      document.getElementById('newContent').value = '';
+      document.getElementById('coverInput').value = '';
+      currentEditId = null;
+      cancelBtn.classList.add('hidden');
+    };
+
+    // —— 删除 / 编辑 / 预览 —— 
+    window.deleteArticle = async id => {
+      if (!confirm('确定删除？')) return;
+      const res = await fetch(`${API_BASE}/articles?id=${id}`, {
+        method: 'DELETE',
+        credentials: 'include'
+      });
+      const json = await res.json();
+      if (!json.success) return alert('删除失败：' + json.error);
+      loadArticles(true);
+    };
+    window.editArticle = row => {
+      document.getElementById('newTitle').value   = row.title;
+      document.getElementById('newContent').value = row.content;
+      currentEditId = row.id;
+      cancelBtn.classList.remove('hidden');
+      window.scrollTo(0,0);
+    };
+    window.previewArticle = row => {
+      document.getElementById('previewTitle').textContent  = row.title;
+      document.getElementById('previewCover').src          = row.cover_url || '';
+      document.getElementById('markdownContent').innerHTML = marked.parse(row.content || '');
+      document.getElementById('previewModal').classList.remove('hidden');
+    };
+    window.closePreview = () => document.getElementById('previewModal').classList.add('hidden');
+
+    // —— 搜索 & 滚动加载 —— 
+    searchBtn.onclick = () => loadArticles(true, searchInput.value.trim());
+    window.addEventListener('scroll', () => {
+      if (window.innerHeight + window.scrollY >= document.body.offsetHeight - 10) {
+        loadArticles();
+      }
+    });
+
+    // —— 加载文章列表 —— 
+    async function loadArticles(reset = false, keyword = '') {
+      if (loading) return;
+      loading = true;
+      if (reset) {
+        articlesTable.innerHTML = '';
+        currentPage = 1;
+      }
+      const url = new URL(`${API_BASE}/articles`);
+      url.searchParams.set('page',  currentPage);
+      url.searchParams.set('limit', limit);
+      if (keyword) url.searchParams.set('q', keyword);
+
+      const res = await fetch(url, { credentials: 'include' });
+      const { articles, totalPages } = await res.json();
+
+      articles.forEach(row => {
+        const tr = document.createElement('tr');
+        tr.innerHTML = `
+          <td data-label="标题">${row.title}</td>
+          <td data-label="作者">${row.author_email}</td>
+          <td data-label="内容">${row.content?.slice(0,60)}...</td>
+          <td data-label="创建时间">${formatBeijingTime(row.created_at)}</td>
+          <td data-label="更新时间">${formatBeijingTime(row.updated_at)}</td>
+          <td data-label="星期">${getWeekday(row.created_at)}</td>
+          <td data-label="封面">${row.cover_url?`<img src="${row.cover_url}" style="height:40px;">`:''}</td>
+          <td data-label="操作">
+            <button class="btn" onclick='previewArticle(${JSON.stringify(row)})'>预览</button>
+            <button class="btn" onclick='editArticle(${JSON.stringify(row)})'>编辑</button>
+            <button class="btn" onclick='deleteArticle("${row.id}")'>删除</button>
+          </td>`;
+        articlesTable.appendChild(tr);
+      });
+
+      loading = false;
+      if (currentPage < totalPages) currentPage++;
+    }
+  });
+</script>
+</body>
+</html>
